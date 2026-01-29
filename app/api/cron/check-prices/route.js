@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { scrapeProduct } from "@/lib/firecrawl";
+import { sendPriceDropAlert } from "@/lib/email"; // Make sure this import exists!
 
 export async function GET() {
   return NextResponse.json({
@@ -28,14 +29,14 @@ export async function POST(request) {
 
     if (productsError) throw productsError;
 
-    // --- ADDED ERROR LOGGING HERE ---
+    // --- NEW LOGIC START ---
     const results = {
       total: products.length,
       updated: 0,
       failed: 0,
       priceChanges: 0,
       alertsSent: 0,
-      errors: [] // This will store the reason for failure
+      errors: [] // This array will tell us the specific error
     };
 
     for (const product of products) {
@@ -43,17 +44,17 @@ export async function POST(request) {
         console.log(`Checking product: ${product.url}`);
         const productData = await scrapeProduct(product.url);
 
-        // CHECK 1: Did scraping work?
+        // ERROR TRAP 1: Scraper returned nothing
         if (!productData) {
            results.failed++;
            results.errors.push(`Scraper returned null for ${product.id}`);
            continue;
         }
 
-        // CHECK 2: Is price missing?
+        // ERROR TRAP 2: Price missing
         if (!productData.currentPrice) {
           results.failed++;
-          results.errors.push(`Price missing. Data found: ${JSON.stringify(productData)}`);
+          results.errors.push(`Price missing for ${product.url}. Data found: ${JSON.stringify(productData)}`);
           continue;
         }
 
@@ -78,7 +79,6 @@ export async function POST(request) {
 
           results.priceChanges++;
           
-          // CHECK 3: Price Drop Logic
           if (newPrice < oldPrice) {
             const { data: { user } } = await supabase.auth.admin.getUserById(product.user_id);
 
@@ -104,8 +104,8 @@ export async function POST(request) {
       } catch (error) {
         console.error(`Error processing product ${product.id}:`, error);
         results.failed++;
-        // CAPTURE THE CRASH REASON
-        results.errors.push(`Crash on product ${product.id}: ${error.message}`);
+        // ERROR TRAP 3: The code crashed (e.g. timeout or 404)
+        results.errors.push(`CRASH on product ${product.url}: ${error.message}`);
       }
     }
 
@@ -114,6 +114,7 @@ export async function POST(request) {
       message: "Price check completed",
       results,
     });
+    // --- NEW LOGIC END ---
 
   } catch (error) {
     console.error("Cron job error:", error);
