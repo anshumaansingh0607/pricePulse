@@ -7,95 +7,116 @@ export async function GET() {
     message: "Price check endpoint is working. Use POST to trigger.",
   });
 }
+
 export async function POST(request) {
-     try {
+  try {
     const authHeader = request.headers.get("authorization");
     const cronSecret = process.env.CRON_SECRET;
+    
     if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
-  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-}
-// Use service role to bypass RLS
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-const { data: products, error: productsError } = await supabase
-  .from("products")
-  .select("*");
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-if (productsError) throw productsError;
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY
+    );
 
-console.log(`Found ${products.length} products to check`);
-const results = {
-  total: products.length,
-  updated: 0,
-  failed: 0,
-  priceChanges: 0,
-  alertsSent: 0,
-};
-for (const product of products) {
-    try {
-  const productData = await scrapeProduct(product.url);
+    const { data: products, error: productsError } = await supabase
+      .from("products")
+      .select("*");
 
-  if (!productData.currentPrice) {
-    results.failed++;
-    continue;
-  }
+    if (productsError) throw productsError;
 
-  const newPrice = parseFloat(productData.currentPrice);
-  const oldPrice = parseFloat(product.current_price);
+    // --- ADDED ERROR LOGGING HERE ---
+    const results = {
+      total: products.length,
+      updated: 0,
+      failed: 0,
+      priceChanges: 0,
+      alertsSent: 0,
+      errors: [] // This will store the reason for failure
+    };
 
-  await supabase.from("products").update({
-    current_price: newPrice,
-    currency: productData.currencyCode || product.currency,
-    name: productData.productName || product.name,
-    image_url: productData.productImageUrl || product.image_url,
-    updated_at: new Date().toISOString(),
-  })
-  .eq("id",product.id);
-  if (oldPrice !== newPrice) {
-  await supabase.from("price_history").insert({
-    product_id: product.id,
-    price: newPrice,
-    currency: productData.currencyCode || product.currency,
-  });
+    for (const product of products) {
+      try {
+        console.log(`Checking product: ${product.url}`);
+        const productData = await scrapeProduct(product.url);
 
-  results.priceChanges++;
-  if (newPrice < oldPrice) {
-  // Alert
+        // CHECK 1: Did scraping work?
+        if (!productData) {
+           results.failed++;
+           results.errors.push(`Scraper returned null for ${product.id}`);
+           continue;
+        }
 
-  const {
-    data: { user },
-  } = await supabase.auth.admin.getUserById(product.user_id);
+        // CHECK 2: Is price missing?
+        if (!productData.currentPrice) {
+          results.failed++;
+          results.errors.push(`Price missing. Data found: ${JSON.stringify(productData)}`);
+          continue;
+        }
 
-  if (user?.email) {
-    // Send Email
-    const emailResult=await sendPriceDropAlert(
-  user.email,
-  product,
-  oldPrice,
-  newPrice
-); 
-if (emailResult.success) {
-  results.alertsSent++;
-}
-  }
-}
-}
-results.updated++;
-} catch (error) {
-      console.error(`Error processing product ${product.id}:`, error);
-  results.failed++;
-}
-}
-return NextResponse.json({
-  success: true,
-  message: "Price check completed",
-  results,
-});
+        const newPrice = parseFloat(productData.currentPrice);
+        const oldPrice = parseFloat(product.current_price);
+
+        await supabase.from("products").update({
+          current_price: newPrice,
+          currency: productData.currencyCode || product.currency,
+          name: productData.productName || product.name,
+          image_url: productData.productImageUrl || product.image_url,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", product.id);
+
+        if (oldPrice !== newPrice) {
+          await supabase.from("price_history").insert({
+            product_id: product.id,
+            price: newPrice,
+            currency: productData.currencyCode || product.currency,
+          });
+
+          results.priceChanges++;
+          
+          // CHECK 3: Price Drop Logic
+          if (newPrice < oldPrice) {
+            const { data: { user } } = await supabase.auth.admin.getUserById(product.user_id);
+
+            if (user?.email) {
+              const emailResult = await sendPriceDropAlert(
+                user.email,
+                product,
+                oldPrice,
+                newPrice
+              );
+              if (emailResult.success) {
+                results.alertsSent++;
+              } else {
+                 results.errors.push(`Email failed: ${JSON.stringify(emailResult.error)}`);
+              }
+            } else {
+               results.errors.push(`User email not found for user_id: ${product.user_id}`);
+            }
+          }
+        }
+        results.updated++;
+
+      } catch (error) {
+        console.error(`Error processing product ${product.id}:`, error);
+        results.failed++;
+        // CAPTURE THE CRASH REASON
+        results.errors.push(`Crash on product ${product.id}: ${error.message}`);
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "Price check completed",
+      results,
+    });
+
   } catch (error) {
     console.error("Cron job error:", error);
-return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
-// curl.exe -X POST https://getpricepulse.vercel.app/api/cron/check-prices -H "Authorization:Bearer 060502b5cac360413f1a676dcea0d896ce0964bb739a6f1c1d04042900f3bd4d"
