@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { scrapeProduct } from "@/lib/firecrawl";
 
 export async function GET() {
   return NextResponse.json({
@@ -70,7 +71,7 @@ for (const product of products) {
   if (user?.email) {
     // Send Email
     const emailResult=await sendPriceDropAlert(
-  userEmail,
+  user.email,
   product,
   oldPrice,
   newPrice
@@ -97,3 +98,4 @@ return NextResponse.json({
 return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+// curl.exe -X POST https://getpricepulse.vercel.app/api/cron/check-prices -H "Authorization:Bearer 060502b5cac360413f1a676dcea0d896ce0964bb739a6f1c1d04042900f3bd4d"
